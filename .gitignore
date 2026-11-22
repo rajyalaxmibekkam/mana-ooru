@@ -1,0 +1,43 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+venv/
+.venv/
+backend/venv/
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploaded files
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+
+# Build and editor files
+*.log
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Deployment backups - never upload to GitHub
+deployment-backups/
+
+# Backup archives
+*.zip
