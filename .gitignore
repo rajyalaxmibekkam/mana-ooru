@@ -41,3 +41,6 @@ deployment-backups/
 
 # Backup archives
 *.zip
+
+# Local code backups
+*.local-backup

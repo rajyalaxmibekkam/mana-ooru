@@ -2,10 +2,9 @@
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
-import mimetypes
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
@@ -19,22 +18,13 @@ from app.security import (
     create_access_token,
     get_current_admin
 )
+from app.storage import download_complaint_photo
 
 
 router = APIRouter(
     prefix="/api/admin",
     tags=["President Dashboard"]
 )
-
-
-# --------------------------------
-# PRIVATE PHOTO STORAGE DIRECTORY
-# --------------------------------
-
-# backend/app/routes/admin.py -> backend/uploads
-UPLOADS_DIR = (
-    Path(__file__).resolve().parents[2] / "uploads"
-).resolve()
 
 
 # --------------------------------
@@ -123,50 +113,39 @@ def build_complaint_response(complaint: Complaint):
     }
 
 
-def get_private_photo_file(photo_path: str) -> Path:
-    """
-    Resolve an uploaded photo safely inside backend/uploads.
-    Reject paths outside the configured upload directory.
-    """
+def get_photo_media_type(object_path: str) -> str:
+    """Allow only supported image formats and safe Supabase object paths."""
 
-    prefix = "/uploads/"
-
-    if not photo_path or not photo_path.startswith(prefix):
+    if (
+        not object_path
+        or not object_path.startswith("complaints/")
+        or object_path.startswith("/")
+        or ".." in object_path
+        or "\\" in object_path
+    ):
         raise HTTPException(
             status_code=404,
             detail="Complaint photo not found."
         )
 
-    relative_path = photo_path[len(prefix):]
+    extension = Path(object_path).suffix.lower()
 
-    if not relative_path:
+    media_types = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp"
+    }
+
+    media_type = media_types.get(extension)
+
+    if not media_type:
         raise HTTPException(
-            status_code=404,
-            detail="Complaint photo not found."
+            status_code=415,
+            detail="Unsupported photo format."
         )
 
-    try:
-        photo_file = (UPLOADS_DIR / relative_path).resolve()
-
-        if not photo_file.is_relative_to(UPLOADS_DIR):
-            raise HTTPException(
-                status_code=404,
-                detail="Complaint photo not found."
-            )
-
-    except (OSError, ValueError):
-        raise HTTPException(
-            status_code=404,
-            detail="Complaint photo not found."
-        )
-
-    if not photo_file.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail="Complaint photo not found."
-        )
-
-    return photo_file
+    return media_type
 
 
 # --------------------------------
@@ -300,6 +279,7 @@ def get_complaint_details(
 
 # --------------------------------
 # VIEW COMPLAINT PHOTO
+# PRIVATE SUPABASE STORAGE
 # PRESIDENT AUTHENTICATION REQUIRED
 # --------------------------------
 
@@ -318,33 +298,9 @@ def get_complaint_photo(
                 detail="No photo is attached to this complaint."
             )
 
-        photo_file = get_private_photo_file(
-            complaint.photo_path
-        )
+        object_path = complaint.photo_path
 
-        media_type, _ = mimetypes.guess_type(
-            photo_file.name
-        )
-
-        if media_type not in (
-            "image/jpeg",
-            "image/png",
-            "image/webp"
-        ):
-            raise HTTPException(
-                status_code=415,
-                detail="Unsupported photo format."
-            )
-
-        return FileResponse(
-            path=photo_file,
-            media_type=media_type,
-            filename=photo_file.name,
-            headers={
-                "Cache-Control": "private, no-store",
-                "X-Content-Type-Options": "nosniff"
-            }
-        )
+        media_type = get_photo_media_type(object_path)
 
     except HTTPException:
         raise
@@ -355,6 +311,36 @@ def get_complaint_photo(
         raise HTTPException(
             status_code=500,
             detail="Unable to retrieve complaint photo."
+        )
+
+    # Download from private Supabase storage.
+    # Do not expose the storage key or internal exception details.
+    try:
+        photo_bytes = download_complaint_photo(object_path)
+
+        if not photo_bytes:
+            raise HTTPException(
+                status_code=404,
+                detail="Complaint photo not found."
+            )
+
+        return Response(
+            content=photo_bytes,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": "inline"
+            }
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to retrieve complaint photo from storage."
         )
 
 

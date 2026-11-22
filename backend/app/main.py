@@ -1,5 +1,11 @@
+
 import os
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load backend/.env before importing database and security modules
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

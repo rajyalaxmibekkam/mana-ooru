@@ -22,6 +22,7 @@ from app.models.complaint_history import ComplaintStatusHistory
 from app.models.photo_upload_authorization import (
     ComplaintPhotoUploadAuthorization
 )
+from app.storage import upload_complaint_photo as upload_photo_to_storage, delete_complaint_photo
 
 
 router = APIRouter(
@@ -36,10 +37,6 @@ router = APIRouter(
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
 PHOTO_TOKEN_EXPIRY_MINUTES = 30
-
-BACKEND_DIR = Path(__file__).resolve().parents[2]
-UPLOAD_DIR = BACKEND_DIR / "uploads" / "complaints"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_IMAGES = {
     ".jpg": ("image/jpeg",),
@@ -58,7 +55,6 @@ def hash_upload_token(token: str) -> str:
 
 
 def is_token_expired(expires_at: datetime) -> bool:
-    # SQLite may return a naive datetime even when timezone=True.
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
 
@@ -209,10 +205,7 @@ def submit_complaint(
         location=complaint_data.location
     )
 
-    # Generate a random token. Only its hash is stored in the database.
     raw_upload_token = token_urlsafe(32)
-
-    authorization = None
 
     try:
 
@@ -238,7 +231,6 @@ def submit_complaint(
         db.add(initial_history)
         db.add(authorization)
 
-        # Complaint, history and upload authorization are saved together.
         db.commit()
         db.refresh(new_complaint)
 
@@ -271,6 +263,7 @@ def submit_complaint(
 
 # --------------------------------
 # UPLOAD COMPLAINT PHOTOGRAPH
+# PRIVATE SUPABASE STORAGE
 # --------------------------------
 
 @router.post(
@@ -301,7 +294,7 @@ async def upload_complaint_photo(
             detail="Photo upload authorization is required."
         )
 
-    destination = None
+    uploaded_object_path = None
 
     try:
 
@@ -388,31 +381,33 @@ async def upload_complaint_photo(
             )
 
         unique_filename = f"{token_hex(16)}{extension}"
-        destination = UPLOAD_DIR / unique_filename
+        object_path = f"complaints/{unique_filename}"
 
-        destination.write_bytes(file_bytes)
+        content_type = ALLOWED_IMAGES[extension][0]
+
+        upload_photo_to_storage(
+            object_path=object_path,
+            file_bytes=file_bytes,
+            content_type=content_type
+        )
+
+        uploaded_object_path = object_path
 
         old_photo_path = complaint.photo_path
 
-        complaint.photo_path = (
-            f"/uploads/complaints/{unique_filename}"
-        )
+        complaint.photo_path = object_path
 
         authorization.consumed_at = datetime.now(timezone.utc)
 
-        # Save the photo reference and consume the token together.
         db.commit()
 
-        if old_photo_path:
-
-            old_filename = Path(old_photo_path).name
-            old_file = UPLOAD_DIR / old_filename
-
-            if old_file.parent == UPLOAD_DIR and old_file.exists():
-                try:
-                    old_file.unlink()
-                except OSError:
-                    pass
+        # Delete the previous object only after the new reference is committed.
+        if old_photo_path and old_photo_path.startswith("complaints/"):
+            try:
+                delete_complaint_photo(old_photo_path)
+            except Exception:
+                # Keep the new photo valid even if old-object cleanup fails.
+                pass
 
         return PhotoUploadResponse(
             tracking_id=complaint.tracking_id,
@@ -423,14 +418,13 @@ async def upload_complaint_photo(
     except HTTPException:
         raise
 
-    except (SQLAlchemyError, OSError):
-
+    except Exception:
         db.rollback()
 
-        if destination is not None and destination.exists():
+        if uploaded_object_path is not None:
             try:
-                destination.unlink()
-            except OSError:
+                delete_complaint_photo(uploaded_object_path)
+            except Exception:
                 pass
 
         raise HTTPException(
